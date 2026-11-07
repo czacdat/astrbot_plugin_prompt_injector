@@ -40,7 +40,7 @@ PATCH_OWNER = "_prompt_injector_owner"
     PLUGIN_NAME,
     "DSH (AI)",
     "生图提示词注入：在工具调用层给 generate_image 的 prompt 加固定前缀，不改生图插件源码",
-    "1.0.0",
+    "1.0.1",
 )
 class PromptInjectorPlugin(Star):
     """在工具调用层给生图 prompt 加固定前缀。"""
@@ -52,6 +52,8 @@ class PromptInjectorPlugin(Star):
         self.config = config if config is not None else {}
         self._ensure_task: asyncio.Task | None = None
         self._warned_missing = False
+        # 记录本实例打过补丁的类；切换 target_tool 时用来回收旧补丁
+        self._patched_classes: list[type] = []
         self._reload_cfg()
 
     # ------------------------------------------------------------------ #
@@ -103,9 +105,58 @@ class PromptInjectorPlugin(Star):
         self._ensure_task = asyncio.create_task(self._ensure_loop())
 
     async def terminate(self) -> None:
-        if self._ensure_task is not None:
-            self._ensure_task.cancel()
-            self._ensure_task = None
+        """插件卸载/停用时调用：停掉自检循环，并把类上的补丁还原。
+
+        必须还原，否则停用插件后 patched_call 还挂在类上，
+        注入会继续生效，而且它闭包里持有本实例，导致无法回收。
+        """
+        task, self._ensure_task = self._ensure_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"{LOG} 自检任务结束异常: {exc}")
+        self._restore_all_patches()
+
+    def _restore_all_patches(self) -> None:
+        """还原本实例打过的所有补丁。"""
+        for cls in list(self._patched_classes):
+            if self._release_patch_on(cls):
+                logger.info(f"{LOG} 已还原 {cls.__name__} 的补丁")
+        self._patched_classes.clear()
+
+    def _release_patch_on(self, cls: type) -> bool:
+        """还原某个类上的补丁；只还原「本实例打的」，避免误撤新实。</br>
+        返回是否真的还原了。"""
+        if cls.__dict__.get(PATCH_OWNER) is not self:
+            return False
+        original = cls.__dict__.get(PATCH_ORIGINAL)
+        if original is not None:
+            try:
+                setattr(cls, "call", original)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"{LOG} 还原 {cls.__name__} 的 call 失败: {exc}")
+                return False
+        for attr in (PATCH_FLAG, PATCH_ORIGINAL, PATCH_OWNER):
+            try:
+                delattr(cls, attr)
+            except AttributeError:
+                pass
+        return True
+
+    def _release_stale_patches(self, keep: type) -> None:
+        """回收目标之外、由本实例打过的补丁（切换 target_tool 时用）。"""
+        for cls in list(self._patched_classes):
+            if cls is keep:
+                continue
+            if self._release_patch_on(cls):
+                logger.info(
+                    f"{LOG} 目标工具已切换，已还原 {cls.__name__} 的旧补丁"
+                )
+            self._patched_classes.remove(cls)
 
     async def _ensure_loop(self) -> None:
         while True:
@@ -146,10 +197,14 @@ class PromptInjectorPlugin(Star):
             return False
 
         cls = type(tool)
+        # 目标可能被配置改过：先把旧目标上的补丁撤掉，避免两个类同时被注入
+        self._release_stale_patches(cls)
         # 只看类自己身上的标记：用 getattr 会把父类的标记继承过来，导致子类被误判为「已打过」
         # 同时检查「打补丁的是不是当前这个插件实例」：插件被重载后，
         # 旧实例的包装函数还挂在类上，配置会变旧，必须用新实例重新包一次
         if cls.__dict__.get(PATCH_FLAG) and cls.__dict__.get(PATCH_OWNER) is self:
+            if cls not in self._patched_classes:
+                self._patched_classes.append(cls)
             return True
 
         # 始终基于「最初的原始实现」重新包装，避免重载后套娃
@@ -179,6 +234,8 @@ class PromptInjectorPlugin(Star):
         setattr(cls, PATCH_FLAG, True)
         setattr(cls, PATCH_ORIGINAL, original)
         setattr(cls, PATCH_OWNER, self)
+        if cls not in self._patched_classes:
+            self._patched_classes.append(cls)
         self._warned_missing = False
         logger.info(
             f"{LOG} 已拦截工具 {self.target_tool}（类 {cls.__name__}）"
@@ -243,16 +300,19 @@ class PromptInjectorPlugin(Star):
                 return False
         return gid in self.whitelist_groups
 
+    @staticmethod
+    def _norm_prompt(text: str) -> str:
+        """规范化用于比较：忽略空格/中英文逗号差异，避免「只差一个空格」被判成没注入过。"""
+        return re.sub(r"[\s,，、]+", ",", str(text or "").lower()).strip(",")
+
     def _apply_prefix(self, prompt: str) -> str:
         """把前缀拼到最前面；开启防重复时，开头已有就不再加。"""
         prefix = self.prefix.strip()
         if not prefix:
             return prompt
         body = prompt.strip()
-        if self.dedupe:
-            head = body[: len(prefix) + len(self.separator) + 4].lower()
-            if head.startswith(prefix.lower()):
-                return prompt
+        if self.dedupe and self._norm_prompt(body).startswith(self._norm_prompt(prefix)):
+            return prompt
         if not body:
             return prefix
         return f"{prefix}{self.separator}{body}"
@@ -290,10 +350,12 @@ class PromptInjectorPlugin(Star):
                 gid = str(event.get_group_id() or "") if event is not None else ""
             except Exception:  # noqa: BLE001
                 gid = ""
+            # 默认只记长度：prompt 里可能有群内容/敏感词，不该整段落进日志
             logger.info(
                 f"{LOG} 已注入前缀（{'群' + gid if gid else '私聊'}）: "
-                f"{new_prompt[:120]}"
+                f"+{len(new_prompt) - len(prompt)} 字符，共 {len(new_prompt)} 字符"
             )
+            logger.debug(f"{LOG} 注入后 prompt 前 120 字: {new_prompt[:120]}")
         return kwargs
 
     # ------------------------------------------------------------------ #
@@ -311,7 +373,7 @@ class PromptInjectorPlugin(Star):
         )
 
     @filter.command("注入前缀")
-    async def inject_prefix_command(self, event: AstrMessageEvent, sub: str = "", rest: str = ""):
+    async def inject_prefix_command(self, event: AstrMessageEvent):
         """生图提示词注入开关与设置。"""
         event.stop_event()
 
@@ -366,9 +428,10 @@ class PromptInjectorPlugin(Star):
                 return
             merged = list(dict.fromkeys(self.whitelist_groups + items))
             ok = await self._persist(whitelist_groups=merged)
-            yield event.plain_result(
-                "✅ 白名单已更新：\n" + ("、".join(merged) if ok else "") if ok else "❌ 保存失败，请看插件日志"
-            )
+            if not ok:
+                yield event.plain_result("❌ 保存失败，请看插件日志")
+                return
+            yield event.plain_result("✅ 白名单已更新：\n" + "、".join(merged))
             return
 
         if action in ("移除白名单", "del", "删除白名单"):

@@ -134,8 +134,11 @@ prompt 是 None   → 补成前缀
 正常注入：
 
 ```
-[PromptInjector] 已注入前缀（群951215780）: masterpiece, best quality, 1girl, solo, ...
+[PromptInjector] 已注入前缀（群951215780）: +32 字符，共 118 字符
 ```
+
+> 默认只记长度 —— prompt 里可能有群聊内容或敏感词，不该整段落进日志。
+> 想看注入后的原文，把插件日志级别调到 `debug`。
 
 拦截成功：
 
