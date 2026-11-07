@@ -1,7 +1,7 @@
 name: astrbot_plugin_prompt_injector
 display_name: 生图提示词注入
 desc: 不改生图插件源码，在工具调用层给 generate_image 的 prompt 强制加固定前缀（画师词/质量词），不经过大模型
-version: 1.0.1
+version: 1.0.2
 author: DSH (AI)
 astrbot_version: ">=4.25.3"
 short_desc: 给生图 prompt 加固定前缀
