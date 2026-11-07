@@ -1,0 +1,44 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用提示词注入",
+    "default": true,
+    "hint": "关掉后不会再给任何生图请求加前缀，配置保留"
+  },
+  "prefix": {
+    "type": "text",
+    "description": "固定前缀（会拼到 prompt 最前面）",
+    "default": "masterpiece, best quality, very aesthetic",
+    "hint": "画师词、质量词都可以，用英文逗号分隔；留空等于不注入"
+  },
+  "separator": {
+    "type": "string",
+    "description": "前缀与正文之间的分隔符",
+    "default": ", ",
+    "hint": "一般保持『逗号+空格』即可；改成『，』也行"
+  },
+  "target_tool": {
+    "type": "string",
+    "description": "要拦截的工具名",
+    "default": "generate_image",
+    "hint": "生图插件的工具名默认是 generate_image，一般不用改"
+  },
+  "dedupe": {
+    "type": "bool",
+    "description": "防重复注入",
+    "default": true,
+    "hint": "开：prompt 开头已有前缀就不再重复加，避免两次调用叠加"
+  },
+  "whitelist_groups": {
+    "type": "list",
+    "description": "生效范围 · 群号白名单",
+    "default": [],
+    "hint": "留空 = 所有群和私聊都生效；填了群号就只在这些群生效（可点『+』添加多个）"
+  },
+  "log_injections": {
+    "type": "bool",
+    "description": "记录注入日志",
+    "default": true,
+    "hint": "开：每次注入都在日志里留一行，方便排查；关：只在出错时记录"
+  }
+}
